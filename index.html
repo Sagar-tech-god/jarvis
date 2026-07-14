@@ -137,6 +137,27 @@
   #toast{position:fixed; left:50%; bottom:96px; transform:translateX(-50%) translateY(20px); z-index:120; background:var(--panel-2); border:1px solid var(--cyan-dim); color:var(--bright); padding:12px 18px; border-radius:12px; font-family:"Chakra Petch",sans-serif; font-size:13px; letter-spacing:.06em; box-shadow:0 0 30px rgba(var(--acc),.3); opacity:0; pointer-events:none; transition:.3s;}
   #toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
 
+  .cam-bg{position:fixed; inset:0; z-index:150; background:#000; display:none;}
+  .cam-bg.open{display:block;}
+  .cam-inner{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;}
+  #camVideo{width:100%; height:100%; object-fit:cover;}
+  .cam-controls{position:absolute; bottom:calc(env(safe-area-inset-bottom) + 30px); left:0; right:0; display:flex; align-items:center; justify-content:center; gap:40px;}
+  .cam-shoot{width:70px; height:70px; border-radius:50%; border:4px solid #fff; background:rgba(var(--acc),.3); cursor:pointer;}
+  .cam-shoot:active{transform:scale(.92);}
+  .cam-x,.cam-flip{width:48px; height:48px; border-radius:50%; border:1px solid rgba(255,255,255,.3); background:rgba(0,0,0,.4); color:#fff; font-size:20px; cursor:pointer;}
+  .cam-scan{position:absolute; top:12%; left:12%; right:12%; bottom:24%; border:1px solid rgba(var(--acc),.5); border-radius:12px; pointer-events:none; box-shadow:0 0 0 100vmax rgba(0,0,0,.25);}
+
+  .cam-bg{position:fixed; inset:0; z-index:150; background:#000; display:none; flex-direction:column;}
+  .cam-bg.open{display:flex;}
+  #camVid{flex:1; width:100%; height:100%; object-fit:cover;}
+  .cam-frame{position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 0 2px rgba(var(--acc),.4), inset 0 0 60px rgba(var(--acc),.15);}
+  .cam-frame::before,.cam-frame::after{content:""; position:absolute; left:20px; right:20px; height:2px; background:linear-gradient(90deg,transparent,rgb(var(--acc)),transparent);}
+  .cam-frame::before{top:80px;} .cam-frame::after{bottom:150px;}
+  .cam-controls{position:absolute; bottom:0; left:0; right:0; padding:24px 0 calc(env(safe-area-inset-bottom) + 30px); display:flex; align-items:center; justify-content:center; gap:40px;}
+  .cam-side{width:52px; height:52px; border-radius:50%; border:1px solid var(--line); background:rgba(0,0,0,.5); color:var(--cyan); font-size:22px; display:grid; place-items:center; cursor:pointer;}
+  .cam-shot{width:74px; height:74px; border-radius:50%; border:4px solid var(--cyan); background:rgba(var(--acc),.25); cursor:pointer; box-shadow:0 0 24px rgba(var(--acc),.6);}
+  .cam-shot:active{transform:scale(.92);}
+
   @media (prefers-reduced-motion:reduce){*{animation-duration:.001s !important; animation-iteration-count:1 !important;}}
 </style>
 </head>
@@ -145,6 +166,17 @@
   <canvas id="bg"></canvas>
   <div id="boot"><div class="bcore"></div><pre id="bootlog"></pre></div>
   <div id="toast"></div>
+
+  <div class="cam-bg" id="camModal">
+    <div class="cam-inner">
+      <video id="camVideo" playsinline autoplay muted></video>
+      <div class="cam-controls">
+        <button class="cam-x" id="camClose">✕</button>
+        <button class="cam-shoot" id="camShoot" title="Capture"></button>
+        <button class="cam-flip" id="camFlip" title="Flip">⟲</button>
+      </div>
+    </div>
+  </div>
 
   <header>
     <div>
@@ -198,6 +230,17 @@
       <div class="grp">
         <div class="row"><label style="margin:0">Voice Interrupt (hands-free)</label><div class="toggle" id="interruptToggle"></div></div>
         <div class="hint">While Jarvis speaks, say <code>stop</code> to pause and <code>continue</code> to resume — no tapping. May vary by device.</div>
+      </div>
+
+      <div class="grp">
+        <div class="row"><label style="margin:0">Conversation Mode</label><div class="toggle" id="convToggle"></div></div>
+        <div class="hint">After Jarvis replies, the mic re-opens automatically for a natural back-and-forth. No tapping between turns.</div>
+      </div>
+
+      <div class="grp">
+        <label>Your Name</label>
+        <input id="nameInput" type="text" placeholder="e.g. Sagar (or leave blank for 'sir')" autocomplete="off">
+        <div class="hint">What Jarvis calls you.</div>
       </div>
 
       <div class="grp">
@@ -278,8 +321,15 @@ function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("sho
 /* ============================ memory ============================ */
 let history = store.getJSON("history", []);   // {role, content}
 let facts = store.getJSON("facts", []);        // strings
+let userName = store.get("name", "");
 function saveHistory(){ store.setJSON("history", history.slice(-60)); }
-function fullPrompt(){ return facts.length ? BASE_PROMPT + "\n\nKnown facts about the user (use when relevant): " + facts.join("; ") : BASE_PROMPT; }
+function addressee(){ return userName ? userName : "sir"; }
+function fullPrompt(){
+  let p = BASE_PROMPT;
+  if(userName) p += "\n\nThe user's name is "+userName+". Address them as \""+userName+"\" instead of \"sir\".";
+  if(facts.length) p += "\n\nKnown facts about the user (use when relevant): " + facts.join("; ");
+  return p;
+}
 
 function addMsg(who, text, imgUrl){
   const el=document.createElement("div");
@@ -299,25 +349,25 @@ function loadVoices(){
 }
 if("speechSynthesis" in window){ loadVoices(); speechSynthesis.onvoiceschanged=loadVoices; }
 function currentVoice(){ return voices.find(v=>v.voiceURI===chosenVoiceURI) || voices.find(v=>/en-GB/i.test(v.lang)&&/male|daniel|arthur|uk/i.test(v.name)) || voices.find(v=>/en-GB/i.test(v.lang)) || voices.find(v=>/^en/i.test(v.lang)) || null; }
-let voiceEnabled=true, voiceInterrupt=true, spRate=1.03, spPitch=0.95;
-let spQueue=[], spIdx=0, spPaused=false, spIntentional=false, spStarted=false;
+let voiceEnabled=true, voiceInterrupt=true, convMode=false, spRate=1.03, spPitch=0.95;
+let spQueue=[], spIdx=0, spPaused=false, spIntentional=false, spStarted=false, spDone=null;
 function splitSentences(t){ return (String(t).match(/[^.!?]+[.!?]*/g)||[t]).map(s=>s.trim()).filter(Boolean); }
-function speak(text){
-  if(!voiceEnabled||!("speechSynthesis" in window)) return;
-  cancelSpeak(); spQueue=splitSentences(text); spIdx=0; spPaused=false; spStarted=false; speakNext();
+function speak(text, done){
+  if(!voiceEnabled||!("speechSynthesis" in window)){ if(done)done(); return; }
+  cancelSpeak(); spQueue=splitSentences(text); spIdx=0; spPaused=false; spStarted=false; spDone=done||null; speakNext();
 }
 function speakNext(){
   if(spPaused) return;
-  if(spIdx>=spQueue.length){ if(!recognizing)setState("idle"); stopBarge(); return; }
+  if(spIdx>=spQueue.length){ if(!recognizing)setState("idle"); stopBarge(); const d=spDone; spDone=null; if(d)d(); return; }
   const u=new SpeechSynthesisUtterance(spQueue[spIdx]);
   const v=currentVoice(); if(v)u.voice=v; u.rate=spRate; u.pitch=spPitch;
-  u.onstart=()=>{ setState("speaking"); if(!spStarted){ spStarted=true; startBarge(); } };
+  u.onstart=()=>{ setState("speaking"); if(!spStarted){ spStarted=true; if(!convMode) startBarge(); } };
   u.onend=()=>{ if(spIntentional){ spIntentional=false; return; } spIdx++; speakNext(); };
   speechSynthesis.speak(u);
 }
 function stopSpeak(){ if(spIdx>=spQueue.length&&!speechSynthesis.speaking) return; spPaused=true; spIntentional=true; try{speechSynthesis.cancel();}catch(e){} setState("idle"); toast("⏸ Paused — say \"continue\""); }
 function resumeSpeak(){ if(spPaused&&spIdx<spQueue.length){ spPaused=false; toast("▶ Resuming"); speakNext(); } }
-function cancelSpeak(){ spPaused=false; spIntentional=true; spQueue=[]; spIdx=0; try{speechSynthesis.cancel();}catch(e){} stopBarge(); }
+function cancelSpeak(){ spPaused=false; spIntentional=true; spQueue=[]; spIdx=0; spDone=null; try{speechSynthesis.cancel();}catch(e){} stopBarge(); }
 
 /* ============================ Gemini call ============================ */
 let searchBroken=false;
@@ -337,11 +387,50 @@ async function callGemini(contents, useSearch){
 }
 function ctxFromHistory(){ return history.slice(-16).map(m=>({ role:m.role==="assistant"?"model":"user", parts:[{ text:m.content }] })); }
 
+async function streamGemini(contents, useSearch, onChunk){
+  const url="https://generativelanguage.googleapis.com/v1beta/models/"+CONFIG.model+":streamGenerateContent?alt=sse&key="+encodeURIComponent(API_KEY);
+  const payload={ contents, systemInstruction:{ parts:[{ text:fullPrompt() }] }, generationConfig:{ maxOutputTokens:800, thinkingConfig:{ thinkingLevel:"low" } } };
+  if(useSearch && !searchBroken) payload.tools=[{ google_search:{} }];
+  const resp=await fetch(url,{ method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(payload) });
+  if(!resp.ok || !resp.body) throw new Error("stream "+resp.status);
+  const reader=resp.body.getReader(), dec=new TextDecoder(); let buf="", full="";
+  while(true){
+    const { done, value }=await reader.read(); if(done) break;
+    buf+=dec.decode(value,{ stream:true }); let i;
+    while((i=buf.indexOf("\n"))>=0){
+      const line=buf.slice(0,i); buf=buf.slice(i+1);
+      if(line.startsWith("data:")){
+        const js=line.slice(5).trim(); if(!js||js==="[DONE]") continue;
+        try{ const d=JSON.parse(js); const t=((d.candidates&&d.candidates[0]&&d.candidates[0].content&&d.candidates[0].content.parts)||[]).map(p=>p.text||"").join(""); if(t){ full+=t; onChunk(full); } }catch(e){}
+      }
+    }
+  }
+  return full.trim();
+}
+
 /* ============================ ask entry ============================ */
-function openSettings(){ $("keyInput").value=API_KEY; $("modelSel").value=CONFIG.model; $("sheetBg").classList.add("open"); }
+function openSettings(){ $("keyInput").value=API_KEY; $("modelSel").value=CONFIG.model; $("nameInput").value=userName; $("sheetBg").classList.add("open"); }
 
 /* ============================ vision (camera / image) ============================ */
-$("camBtn").addEventListener("click", ()=>$("fileIn").click());
+let camStream=null, camFacing="environment";
+async function openCam(){
+  try{
+    if(camStream) camStream.getTracks().forEach(t=>t.stop());
+    camStream=await navigator.mediaDevices.getUserMedia({ video:{ facingMode:camFacing }, audio:false });
+    $("camVideo").srcObject=camStream;
+    $("camModal").classList.add("open");
+  }catch(e){ $("fileIn").click(); }   // no camera / denied -> gallery fallback
+}
+function closeCam(){ $("camModal").classList.remove("open"); if(camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream=null; } }
+$("camBtn").addEventListener("click", openCam);
+$("camClose").addEventListener("click", closeCam);
+$("camFlip").addEventListener("click", ()=>{ camFacing=camFacing==="environment"?"user":"environment"; openCam(); });
+$("camShoot").addEventListener("click", ()=>{
+  const v=$("camVideo"); if(!v.videoWidth) return;
+  const cn=document.createElement("canvas"); cn.width=v.videoWidth; cn.height=v.videoHeight;
+  cn.getContext("2d").drawImage(v,0,0);
+  const dataUrl=cn.toDataURL("image/jpeg",0.82); closeCam(); askVision(dataUrl,"image/jpeg");
+});
 $("fileIn").addEventListener("change", e=>{
   const f=e.target.files&&e.target.files[0]; if(!f) return;
   const rd=new FileReader();
@@ -369,6 +458,8 @@ async function askVision(dataUrl, mime){
 /* ============================ voice commands / actions ============================ */
 const SITES={ youtube:"https://youtube.com", google:"https://google.com", gmail:"https://mail.google.com", maps:"https://maps.google.com", whatsapp:"https://web.whatsapp.com", instagram:"https://instagram.com", twitter:"https://x.com", "x":"https://x.com", github:"https://github.com", tradingview:"https://tradingview.com", spotify:"https://open.spotify.com", chatgpt:"https://chat.openai.com", netflix:"https://netflix.com", "play store":"https://play.google.com", "google drive":"https://drive.google.com", drive:"https://drive.google.com", calendar:"https://calendar.google.com", "google calendar":"https://calendar.google.com", gemini:"https://gemini.google.com", reddit:"https://reddit.com", amazon:"https://amazon.in", "play music":"https://music.youtube.com", "youtube music":"https://music.youtube.com" };
 function reply(text){ addMsg("jar", text); caption("Online",true); setStatus("ONLINE"); speak(text); }
+let notes=store.getJSON("notes",[]);
+let reminders=store.getJSON("reminders",[]);
 function handleCommand(raw){
   let t=raw.trim();
   // strip a leading wake word ("jarvis", "hey jarvis", "ok jarvis")
@@ -404,24 +495,82 @@ function handleCommand(raw){
   m=l.match(/(?:set (?:a )?timer (?:for )?|timer )(\d+)\s*(sec|second|min|minute|hour)/);
   if(m){ const n=parseInt(m[1]); const unit=m[2]; const ms=n*(unit.startsWith("hour")?3600000:unit.startsWith("min")?60000:1000); startTimer(ms, n+" "+unit+(n>1?"s":"")); reply("Timer set for "+n+" "+unit+(n>1?"s":"")+", sir."); return true; }
 
+  // WhatsApp — writes the message, you tap send
+  m=t.match(/^(?:whatsapp|message on whatsapp|send (?:a )?whatsapp(?: message)?(?: to)?)\s+(.+?)\s+(?:saying|that|:|-|,)\s+(.+)/i);
+  if(m){ waOpen(m[1],m[2]); reply(/^\+?[\d\s-]+$/.test(m[1])?"Opening WhatsApp with your message, sir.":"WhatsApp is ready, sir — choose "+m[1]+" and tap send."); return true; }
+  m=t.match(/^whatsapp\s+(\+?[\d\s-]{8,})$/i);
+  if(m){ waOpen(m[1],""); reply("Opening WhatsApp, sir."); return true; }
+  // SMS
+  m=t.match(/^(?:text|sms)\s+(\+?[\d\s-]{6,})\s+(?:saying|that|:|-|,)?\s*(.+)/i);
+  if(m){ const num=m[1].replace(/[^\d+]/g,""); window.open("sms:"+num+"?body="+encodeURIComponent(m[2]),"_blank"); reply("Your text to "+num+" is ready, sir — tap send."); return true; }
+  // Call
+  m=t.match(/^(?:call|dial|phone)\s+(\+?[\d\s-]{4,})$/i);
+  if(m){ const num=m[1].replace(/[^\d+]/g,""); window.open("tel:"+num,"_blank"); reply("Calling "+num+", sir."); return true; }
+  m=t.match(/^(?:call|dial|phone)\s+([a-z].*)/i);
+  if(m){ reply("I can't dial by name yet, sir — give me a number and I'll place the call."); return true; }
+  // Play
+  m=t.match(/^play\s+(.+?)(?:\s+on\s+(youtube music|youtube|spotify))?$/i);
+  if(m){ const q=m[1], on=(m[2]||"youtube").toLowerCase(); const url=on==="spotify"?"https://open.spotify.com/search/"+encodeURIComponent(q):on==="youtube music"?"https://music.youtube.com/search?q="+encodeURIComponent(q):"https://www.youtube.com/results?search_query="+encodeURIComponent(q); window.open(url,"_blank"); reply("Playing "+q+", sir."); return true; }
+  // Weather
+  if(/^(?:what.?s |what is )?(?:the )?(?:weather|temperature|forecast)\b/.test(l) || l==="weather"){ getWeather(); return true; }
+  // Notes / list
+  m=t.match(/^add (.+?) to (?:my )?(?:list|notes|todo|to-?do)$/i);
+  if(m){ notes.push(m[1]); store.setJSON("notes",notes); reply("Added \u201c"+m[1]+"\u201d to your list, sir."); return true; }
+  if(/^(?:what.?s on |show |read |view )?(?:my )?(?:list|notes|to-?do)\??$/.test(l)){ reply(notes.length?"Your list, sir: "+notes.join("; ")+".":"Your list is empty, sir."); return true; }
+  if(/^clear (?:my )?(?:list|notes|to-?do)\b/.test(l)){ notes=[]; store.setJSON("notes",[]); reply("List cleared, sir."); return true; }
+  // Reminders (fire while the app is open)
+  m=t.match(/^remind me to (.+?) in (\d+)\s*(sec|second|seconds|min|minute|minutes|hour|hours|hr)/i);
+  if(m){ const n=parseInt(m[2]),u=m[3].toLowerCase(); const ms=n*(u.startsWith("h")?3600000:u.startsWith("s")?1000:60000); addReminder(m[1], Date.now()+ms); reply("I'll remind you to "+m[1]+" in "+n+" "+u+", sir."); return true; }
+  m=t.match(/^remind me to (.+?) at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if(m){ let hh=parseInt(m[2]); const mm=m[3]?parseInt(m[3]):0, ap=(m[4]||"").toLowerCase(); if(ap==="pm"&&hh<12)hh+=12; if(ap==="am"&&hh===12)hh=0; const d=new Date(); d.setHours(hh,mm,0,0); if(d.getTime()<=Date.now())d.setDate(d.getDate()+1); addReminder(m[1],d.getTime()); reply("I'll remind you to "+m[1]+" at "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+", sir."); return true; }
+
   return false;
 }
 let audioCtx=null;
 function beep(){ try{ audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)(); for(let i=0;i<3;i++){ const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.connect(g); g.connect(audioCtx.destination); o.frequency.value=880; g.gain.value=.15; const s=audioCtx.currentTime+i*.35; o.start(s); o.stop(s+.2);} }catch(e){} }
 function startTimer(ms,label){ setTimeout(()=>{ buzz([200,100,200]); beep(); toast("⏱ Timer done: "+label); reply("Your "+label+" timer is complete, sir."); }, ms); }
+function waOpen(recipient,msg){
+  const digits=(recipient||"").replace(/[^\d]/g,"");
+  if(digits.length>=8) window.open("https://wa.me/"+digits+"?text="+encodeURIComponent(msg||""),"_blank");
+  else window.open("https://api.whatsapp.com/send?text="+encodeURIComponent(msg||""),"_blank");
+}
+function notify(title,body){ try{ if("Notification" in window){ if(Notification.permission==="granted") new Notification(title,{body,icon:"./icon-192.png"}); else if(Notification.permission!=="denied") Notification.requestPermission(); } }catch(e){} }
+function scheduleReminder(rem){ const delay=rem.time-Date.now(); if(delay<=0) return; setTimeout(()=>{ buzz([200,100,200]); beep(); notify("Reminder",rem.text); reply("Reminder, sir: "+rem.text+"."); reminders=reminders.filter(x=>x.id!==rem.id); store.setJSON("reminders",reminders); }, Math.min(delay,2147483647)); }
+function addReminder(text,time){ const rem={id:Date.now()+"_"+Math.floor(Math.random()*1e6), text, time}; reminders.push(rem); store.setJSON("reminders",reminders); notify("Reminders enabled",""); scheduleReminder(rem); }
+function weatherText(code){ const m={0:"clear skies",1:"mainly clear skies",2:"partly cloudy skies",3:"overcast skies",45:"fog",48:"fog",51:"light drizzle",53:"drizzle",55:"heavy drizzle",61:"light rain",63:"rain",65:"heavy rain",66:"freezing rain",67:"freezing rain",71:"light snow",73:"snow",75:"heavy snow",77:"snow grains",80:"rain showers",81:"rain showers",82:"heavy rain showers",85:"snow showers",86:"snow showers",95:"thunderstorms",96:"thunderstorms with hail",99:"thunderstorms with hail"}; return m[code]||"changeable skies"; }
+function getWeather(){
+  caption("Checking the skies…");
+  if(!navigator.geolocation){ reply("I can't reach your location, sir."); return; }
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    try{
+      const la=pos.coords.latitude, lo=pos.coords.longitude;
+      const r=await fetch("https://api.open-meteo.com/v1/forecast?latitude="+la+"&longitude="+lo+"&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m");
+      const d=await r.json(), cur=d.current;
+      reply("It's "+Math.round(cur.temperature_2m)+"°C with "+weatherText(cur.weather_code)+", humidity around "+Math.round(cur.relative_humidity_2m)+"%, winds "+Math.round(cur.wind_speed_10m)+" km/h, sir.");
+    }catch(e){ reply("I couldn't fetch the weather just now, sir."); }
+  }, ()=>{ reply("I need location permission for that, sir — allow it in the address bar."); }, {timeout:10000, enableHighAccuracy:false});
+}
 
 /* ============================ send / input ============================ */
 function sendText(){ const t=$("text").value.trim(); if(!t)return; $("text").value=""; addMsg("you",t); askOrCommand(t); }
-async function askOrCommand(t){ /* addMsg already done; run pipeline without double-adding */
+async function askOrCommand(t){
   if(handleCommand(t)) return;
   if(!API_KEY){ addMsg("jar","I need your Gemini key, sir. Tap the gear."); openSettings(); return; }
   history.push({ role:"user", content:t }); saveHistory();
   setState("thinking"); setStatus("PROCESSING"); caption("Processing…");
+  const bubble=addMsg("jar","…");
+  const paint=txt=>{ bubble.innerHTML='<span class="who">JARVIS</span>'+escapeHtml(txt); logEl.scrollTop=logEl.scrollHeight; };
   try{
-    const rep=(await callGemini(ctxFromHistory(), webSearch))||"My apologies, sir — empty response.";
+    let rep="";
+    try{ rep=await streamGemini(ctxFromHistory(), webSearch, paint); }
+    catch(e){ if(webSearch) searchBroken=true; rep=await callGemini(ctxFromHistory(), webSearch); }
+    rep=(rep||"").trim()||"My apologies, sir — I received an empty response.";
+    paint(rep);
     history.push({ role:"assistant", content:rep }); saveHistory();
-    addMsg("jar",rep); setStatus("ONLINE"); caption("Online",true); speak(rep); if(!voiceEnabled)setState("idle");
-  }catch(err){ setState("idle"); setStatus("ONLINE"); addMsg("jar","I couldn't reach my reasoning core, sir. ("+String(err.message||err).slice(0,110)+")"); caption("Error",true); }
+    setStatus("ONLINE"); caption("Online",true);
+    speak(rep, ()=>{ if(convMode) startConvListen(); });
+    if(!voiceEnabled){ setState("idle"); if(convMode) startConvListen(); }
+  }catch(err){ setState("idle"); setStatus("ONLINE"); paint("I couldn't reach my reasoning core, sir. ("+String(err.message||err).slice(0,110)+")"); caption("Error",true); }
 }
 $("sendBtn").addEventListener("click", sendText);
 $("text").addEventListener("keydown", e=>{ if(e.key==="Enter") sendText(); });
@@ -461,6 +610,12 @@ function toggleMic(){
   setTimeout(go,120);
 }
 micBtn.addEventListener("click", toggleMic); orb.addEventListener("click", toggleMic);
+function startConvListen(){
+  if(!recognition||!convMode||recognizing) return;
+  micMode="command"; recognition.continuous=false;
+  caption("Listening…");
+  setTimeout(()=>{ if(convMode && !recognizing){ try{ recognition.start(); }catch(e){ setTimeout(()=>{ try{recognition.start();}catch(_){} },250); } } }, 300);
+}
 
 /* ============================ settings wiring ============================ */
 $("muteBtn").addEventListener("click", ()=>{ voiceEnabled=!voiceEnabled; $("muteBtn").textContent=voiceEnabled?"🔊":"🔇"; $("muteBtn").classList.toggle("on",voiceEnabled); if(!voiceEnabled)cancelSpeak(); });
@@ -476,6 +631,8 @@ $("keyInput").addEventListener("change", e=>{ API_KEY=e.target.value.trim(); sto
 $("modelSel").addEventListener("change", e=>{ CONFIG.model=e.target.value; store.set("model",CONFIG.model); });
 $("searchToggle").addEventListener("click", ()=>{ webSearch=!webSearch; $("searchToggle").classList.toggle("on",webSearch); store.set("search",webSearch?"1":""); buzz(15); });
 $("interruptToggle").addEventListener("click", ()=>{ voiceInterrupt=!voiceInterrupt; $("interruptToggle").classList.toggle("on",voiceInterrupt); store.set("interrupt",voiceInterrupt?"1":"0"); if(!voiceInterrupt)stopBarge(); buzz(15); });
+$("convToggle").addEventListener("click", ()=>{ convMode=!convMode; $("convToggle").classList.toggle("on",convMode); store.set("conv",convMode?"1":"0"); buzz(15); if(convMode) toast("Conversation mode on"); });
+$("nameInput").addEventListener("change", e=>{ userName=e.target.value.trim(); store.set("name",userName); if(userName)caption("Noted — I'll call you "+userName,true); });
 $("clearMem").addEventListener("click", ()=>{ history=[]; facts=[]; store.setJSON("history",[]); store.setJSON("facts",[]); logEl.innerHTML=""; addMsg("sys","MEMORY CLEARED"); toast("Memory wiped"); });
 $("gearBtn").addEventListener("click", openSettings);
 $("closeBtn").addEventListener("click", ()=>$("sheetBg").classList.remove("open"));
@@ -587,8 +744,10 @@ API_KEY=store.get("key","");
 CONFIG.model=store.get("model",CONFIG.model);
 webSearch=store.get("search","1")==="1"; $("searchToggle").classList.toggle("on",webSearch);
 voiceInterrupt=store.get("interrupt","1")==="1"; $("interruptToggle").classList.toggle("on",voiceInterrupt);
+convMode=store.get("conv","")==="1"; $("convToggle").classList.toggle("on",convMode);
 spRate=parseFloat(store.get("rate","1.03"))||1.03; spPitch=parseFloat(store.get("pitch","0.95"))||0.95;
 $("rate").value=spRate; $("rateVal").textContent=spRate.toFixed(2); $("pitch").value=spPitch; $("pitchVal").textContent=spPitch.toFixed(2);
+reminders=reminders.filter(r=>r.time>Date.now()); store.setJSON("reminders",reminders); reminders.forEach(scheduleReminder);
 window.addEventListener("load", ()=>{ setStatus("ONLINE"); boot(); });
 if("serviceWorker" in navigator){ window.addEventListener("load", ()=>navigator.serviceWorker.register("./sw.js").catch(()=>{})); }
 </script>
