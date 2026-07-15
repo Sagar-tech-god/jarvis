@@ -379,6 +379,39 @@ if("speechSynthesis" in window){ loadVoices(); speechSynthesis.onvoiceschanged=l
 function currentVoice(){ return voices.find(v=>v.voiceURI===chosenVoiceURI) || voices.find(v=>/en-GB/i.test(v.lang)&&/male|daniel|arthur|uk/i.test(v.name)) || voices.find(v=>/en-GB/i.test(v.lang)) || voices.find(v=>/^en/i.test(v.lang)) || null; }
 let voiceEnabled=true, voiceInterrupt=true, convMode=false, spRate=1.03, spPitch=0.95;
 let spChunks=[], spCi=0, spDone=null, spCancelled=false, spWatch=null, spGuard=null, spPausedFlag=false;
+let spStreaming=false, spActive=false, spFed=0, spMuted=false;
+
+// --- streaming speech: start talking as soon as the first sentence exists ---
+function speakStart(done){
+  cancelSpeak();
+  spChunks=[]; spCi=0; spCancelled=false; spPausedFlag=false;
+  spStreaming=true; spActive=false; spFed=0; spDone=done||null;
+  spMuted=!(voiceEnabled&&("speechSynthesis" in window));
+}
+function speakFeed(fullText){
+  if(spCancelled||spMuted) return;
+  const pending=String(fullText).slice(spFed);
+  if(!pending) return;
+  // only take up to the last completed sentence; keep the tail for later
+  const m=pending.match(/^[\s\S]*[.!?;:]["')\]]?\s/);
+  if(!m) return;
+  const ready=m[0];
+  spFed+=ready.length;
+  chunkText(ready).forEach(c=>spChunks.push(c));
+  pump();
+}
+function speakEndStream(fullText){
+  if(spCancelled) return;
+  const tail=String(fullText||"").slice(spFed).trim();
+  if(tail && !spMuted){ spFed+=tail.length; chunkText(tail).forEach(c=>spChunks.push(c)); }
+  spStreaming=false;
+  if(spMuted){ finishSpeak(); return; }
+  pump();
+}
+function pump(){ if(!spActive && !spCancelled && !spPausedFlag){ spActive=true; speakChunk(); } }
+
+// --- plain speech (commands, vision, tests) reuses the same pipeline ---
+function speak(text, done){ speakStart(done); speakEndStream(String(text||"")); }
 function chunkText(t){
   const out=[]; const sents=String(t).replace(/\s+/g," ").match(/[^.!?;]+[.!?;]*/g)||[t];
   for(let s of sents){ s=s.trim(); if(!s) continue;
@@ -387,7 +420,7 @@ function chunkText(t){
   }
   return out.length?out:[String(t)];
 }
-const APP_VERSION="v13";
+const APP_VERSION="v14";
 let spDiag=false, spLog=[];
 function diagLog(s){ if(!spDiag) return; spLog.push(s); }
 function runSpeechDiag(){
@@ -406,29 +439,25 @@ const IS_ANDROID=/Android/i.test(navigator.userAgent);
 // utterance so onend never fires. Chunking alone handles the length limit there.
 function startWatch(){ stopWatch(); if(IS_ANDROID) return; spWatch=setInterval(()=>{ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); speechSynthesis.resume(); } }catch(e){} }, 8000); }
 function stopWatch(){ if(spWatch){ clearInterval(spWatch); spWatch=null; } }
-function speak(text, done){
-  cancelSpeak();
-  if(!voiceEnabled||!("speechSynthesis" in window)){ if(done)done(); return; }
-  spChunks=chunkText(text); spCi=0; spDone=done||null; spCancelled=false; spPausedFlag=false;
-  setState("speaking"); startWatch(); if(voiceInterrupt && !convMode) startBarge();
-  speakChunk();
-}
 function speakChunk(){
   if(spCancelled) return;
-  if(spCi>=spChunks.length){ finishSpeak(); return; }
+  if(spCi>=spChunks.length){
+    if(spStreaming){ spActive=false; return; }   // wait for more text to arrive
+    finishSpeak(); return;
+  }
   const txt=spChunks[spCi];
   const idx=spCi;
   const u=new SpeechSynthesisUtterance(txt);
   const v=currentVoice(); if(v)u.voice=v; u.rate=spRate; u.pitch=spPitch;
   let advanced=false;
   const adv=(why)=>{ if(advanced||spCancelled) return; advanced=true; diagLog("  chunk "+idx+" -> advanced ("+why+")"); clearTimeout(spGuard); spCi++; speakChunk(); };
-  u.onstart=()=>{ diagLog("chunk "+idx+" start ("+txt.length+" chars)"); };
+  u.onstart=()=>{ diagLog("chunk "+idx+" start ("+txt.length+" chars)"); if(idx===0){ setState("speaking"); startWatch(); if(voiceInterrupt && !convMode) startBarge(); } };
   u.onend=()=>adv("onend");
   u.onerror=(e)=>{ diagLog("  chunk "+idx+" ERROR: "+(e&&e.error||"?")); adv("onerror"); };
   clearTimeout(spGuard); spGuard=setTimeout(()=>{ if(!advanced && !spPausedFlag){ diagLog("  chunk "+idx+" GUARD FIRED (onend never came)"); try{ speechSynthesis.cancel(); }catch(e){} adv("guard"); } }, txt.length*130+9000);
   try{ speechSynthesis.speak(u); }catch(e){ diagLog("  chunk "+idx+" speak() threw"); adv("throw"); }
 }
-function finishSpeak(){ stopWatch(); clearTimeout(spGuard); stopBarge(); if(!recognizing)setState("idle"); const d=spDone; spDone=null; if(d)d(); }
+function finishSpeak(){ spStreaming=false; spActive=false; stopWatch(); clearTimeout(spGuard); stopBarge(); if(!recognizing)setState("idle"); const d=spDone; spDone=null; if(d)d(); }
 function stopSpeak(){
   if(!speechSynthesis.speaking && !spPausedFlag) return;
   spPausedFlag=true; stopWatch(); clearTimeout(spGuard);
@@ -442,7 +471,7 @@ function resumeSpeak(){
   if(IS_ANDROID){ spCancelled=false; speakChunk(); }             // re-speak from current chunk
   else { try{ speechSynthesis.resume(); }catch(e){} startWatch(); }
 }
-function cancelSpeak(){ spCancelled=true; spPausedFlag=false; spDone=null; stopWatch(); clearTimeout(spGuard); try{ speechSynthesis.cancel(); }catch(e){} stopBarge(); }
+function cancelSpeak(){ spCancelled=true; spStreaming=false; spActive=false; spPausedFlag=false; spDone=null; stopWatch(); clearTimeout(spGuard); try{ speechSynthesis.cancel(); }catch(e){} stopBarge(); }
 
 /* ============================ Gemini call ============================ */
 let searchBroken=false;
@@ -638,18 +667,21 @@ async function askOrCommand(t){
   setState("thinking"); setStatus("PROCESSING"); caption("Processing…");
   const bubble=addMsg("jar","…");
   const paint=txt=>{ bubble.innerHTML='<span class="who">JARVIS</span>'+escapeHtml(txt); logEl.scrollTop=logEl.scrollHeight; };
+  const relisten=()=>{ if(convMode) startConvListen(); };
   try{
     let rep="";
     const useLive = webSearch && needsLive(t);
-    try{ rep=await streamGemini(ctxFromHistory(), useLive, paint); }
+    speakStart(relisten);
+    const onStream=txt=>{ paint(txt); speakFeed(txt); };
+    try{ rep=await streamGemini(ctxFromHistory(), useLive, onStream); }
     catch(e){ if(useLive) searchBroken=true; rep=await callGemini(ctxFromHistory(), useLive); }
     rep=(rep||"").trim()||"My apologies, sir — I received an empty response.";
     paint(rep);
     history.push({ role:"assistant", content:rep }); saveHistory();
     setStatus("ONLINE"); caption("Online",true);
-    speak(rep, ()=>{ if(convMode) startConvListen(); });
-    if(!voiceEnabled){ setState("idle"); if(convMode) startConvListen(); }
-  }catch(err){ setState("idle"); setStatus("ONLINE"); paint("I couldn't reach my reasoning core, sir. ("+String(err.message||err).slice(0,110)+")"); caption("Error",true); }
+    speakEndStream(rep);
+    if(!voiceEnabled) setState("idle");
+  }catch(err){ cancelSpeak(); setState("idle"); setStatus("ONLINE"); paint("I couldn't reach my reasoning core, sir. ("+String(err.message||err).slice(0,110)+")"); caption("Error",true); }
 }
 $("sendBtn").addEventListener("click", sendText);
 $("text").addEventListener("keydown", e=>{ if(e.key==="Enter") sendText(); });
