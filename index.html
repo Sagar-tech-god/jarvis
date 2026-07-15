@@ -408,7 +408,12 @@ function speakEndStream(fullText){
   if(spMuted){ finishSpeak(); return; }
   pump();
 }
-function pump(){ if(!spActive && !spCancelled && !spPausedFlag){ spActive=true; speakChunk(); } }
+function pump(){
+  if(spActive||spCancelled||spPausedFlag) return;
+  spActive=true;
+  setState("speaking"); startWatch(); if(voiceInterrupt && !convMode) startBarge();
+  speakChunk();
+}
 
 // --- plain speech (commands, vision, tests) reuses the same pipeline ---
 function speak(text, done){ speakStart(done); speakEndStream(String(text||"")); }
@@ -420,7 +425,7 @@ function chunkText(t){
   }
   return out.length?out:[String(t)];
 }
-const APP_VERSION="v16";
+const APP_VERSION="v17";
 let spDiag=false, spLog=[];
 function diagLog(s){ if(!spDiag) return; spLog.push(s); }
 function runSpeechDiag(){
@@ -453,21 +458,14 @@ function speakChunk(){
   const u=new SpeechSynthesisUtterance(txt);
   spUtterRefs.push(u); if(spUtterRefs.length>40) spUtterRefs.shift();   // keep refs: GC'd utterances drop their events
   const v=currentVoice(); if(v)u.voice=v; u.rate=spRate; u.pitch=spPitch;
-  let advanced=false, started=false, lastProgress=Date.now();
+  let advanced=false;
   const adv=(why)=>{ if(advanced||spCancelled) return; advanced=true; diagLog("  chunk "+idx+" -> advanced ("+why+")"); clearTimeout(spGuard); clearPoll(); spCi++; speakChunk(); };
-  const retry=(why)=>{ // engine stalled: re-speak THIS chunk so no words are lost
-    if(advanced||spCancelled) return;
-    advanced=true; clearTimeout(spGuard); clearPoll();
-    diagLog("  chunk "+idx+" STALLED ("+why+") -> retrying");
-    try{ speechSynthesis.cancel(); }catch(e){}
-    setTimeout(()=>{ if(!spCancelled){ if(spRetries[idx]=(spRetries[idx]||0)+1, spRetries[idx]>1){ spCi++; } speakChunk(); } }, 250);
-  };
-  u.onstart=()=>{ started=true; lastProgress=Date.now(); diagLog("chunk "+idx+" start ("+txt.length+" chars)"); if(idx===0){ setState("speaking"); startWatch(); if(voiceInterrupt && !convMode) startBarge(); } };
-  u.onboundary=()=>{ lastProgress=Date.now(); };   // fires as it speaks = proof of real progress
+  u.onstart=()=>{ diagLog("chunk "+idx+" start ("+txt.length+" chars)"); };
   u.onend=()=>adv("onend");
   u.onerror=(e)=>{ diagLog("  chunk "+idx+" ERROR: "+(e&&e.error||"?")); adv("onerror"); };
 
-  // Android Chrome can report speaking=true while producing no audio (stuck/paused).
+  // This device fires onstart/onend unreliably, but speechSynthesis.speaking is trustworthy.
+  // So: never cancel working audio — just watch until the engine goes quiet, then continue.
   clearPoll();
   let sawSpeaking=false, ticks=0;
   spPoll=setInterval(()=>{
@@ -475,18 +473,13 @@ function speakChunk(){
     if(spPausedFlag) return;
     ticks++;
     try{ if(speechSynthesis.paused) speechSynthesis.resume(); }catch(e){}   // unstick a paused engine
-    if(speechSynthesis.speaking||speechSynthesis.pending){
-      sawSpeaking=true;
-      if(!started && ticks>13) return retry("no onstart");                   // ~2.6s: never actually began
-      if(started && Date.now()-lastProgress>4000) return retry("no progress");
-      return;
-    }
-    if(sawSpeaking||started){ adv("poll"); return; }
-    if(ticks>15) retry("never-started");
+    if(speechSynthesis.speaking||speechSynthesis.pending){ sawSpeaking=true; return; }
+    if(sawSpeaking){ adv("poll-idle"); return; }      // finished speaking -> next line immediately
+    if(ticks>25) adv("never-spoke");                  // 5s grace, no cancel, just move on
   }, 200);
 
-  clearTimeout(spGuard); spGuard=setTimeout(()=>{ if(!advanced && !spPausedFlag){ diagLog("  chunk "+idx+" GUARD FIRED"); try{ speechSynthesis.cancel(); }catch(e){} adv("guard"); } }, Math.max(4000, txt.length*110/Math.max(spRate,0.5)+4000));
-  try{ speechSynthesis.speak(u); setTimeout(()=>{ try{ if(speechSynthesis.paused) speechSynthesis.resume(); }catch(e){} },120); }catch(e){ diagLog("  chunk "+idx+" speak() threw"); adv("throw"); }
+  clearTimeout(spGuard); spGuard=setTimeout(()=>{ if(!advanced && !spPausedFlag){ diagLog("  chunk "+idx+" GUARD FIRED"); adv("guard"); } }, Math.max(8000, txt.length*150/Math.max(spRate,0.5)+8000));
+  try{ speechSynthesis.speak(u); setTimeout(()=>{ try{ if(speechSynthesis.paused) speechSynthesis.resume(); }catch(e){} },150); }catch(e){ diagLog("  chunk "+idx+" speak() threw"); adv("throw"); }
 }
 function finishSpeak(){ spStreaming=false; spActive=false; clearPoll(); stopWatch(); clearTimeout(spGuard); stopBarge(); if(!recognizing)setState("idle"); const d=spDone; spDone=null; if(d)d(); }
 function stopSpeak(){
