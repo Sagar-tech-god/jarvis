@@ -420,7 +420,7 @@ function chunkText(t){
   }
   return out.length?out:[String(t)];
 }
-const APP_VERSION="v14";
+const APP_VERSION="v15";
 let spDiag=false, spLog=[];
 function diagLog(s){ if(!spDiag) return; spLog.push(s); }
 function runSpeechDiag(){
@@ -439,6 +439,8 @@ const IS_ANDROID=/Android/i.test(navigator.userAgent);
 // utterance so onend never fires. Chunking alone handles the length limit there.
 function startWatch(){ stopWatch(); if(IS_ANDROID) return; spWatch=setInterval(()=>{ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); speechSynthesis.resume(); } }catch(e){} }, 8000); }
 function stopWatch(){ if(spWatch){ clearInterval(spWatch); spWatch=null; } }
+let spUtterRefs=[], spPoll=null;
+function clearPoll(){ if(spPoll){ clearInterval(spPoll); spPoll=null; } }
 function speakChunk(){
   if(spCancelled) return;
   if(spCi>=spChunks.length){
@@ -448,16 +450,30 @@ function speakChunk(){
   const txt=spChunks[spCi];
   const idx=spCi;
   const u=new SpeechSynthesisUtterance(txt);
+  spUtterRefs.push(u); if(spUtterRefs.length>40) spUtterRefs.shift();   // keep refs: GC'd utterances drop their events
   const v=currentVoice(); if(v)u.voice=v; u.rate=spRate; u.pitch=spPitch;
   let advanced=false;
-  const adv=(why)=>{ if(advanced||spCancelled) return; advanced=true; diagLog("  chunk "+idx+" -> advanced ("+why+")"); clearTimeout(spGuard); spCi++; speakChunk(); };
+  const adv=(why)=>{ if(advanced||spCancelled) return; advanced=true; diagLog("  chunk "+idx+" -> advanced ("+why+")"); clearTimeout(spGuard); clearPoll(); spCi++; speakChunk(); };
   u.onstart=()=>{ diagLog("chunk "+idx+" start ("+txt.length+" chars)"); if(idx===0){ setState("speaking"); startWatch(); if(voiceInterrupt && !convMode) startBarge(); } };
   u.onend=()=>adv("onend");
   u.onerror=(e)=>{ diagLog("  chunk "+idx+" ERROR: "+(e&&e.error||"?")); adv("onerror"); };
-  clearTimeout(spGuard); spGuard=setTimeout(()=>{ if(!advanced && !spPausedFlag){ diagLog("  chunk "+idx+" GUARD FIRED (onend never came)"); try{ speechSynthesis.cancel(); }catch(e){} adv("guard"); } }, txt.length*130+9000);
+
+  // Android Chrome often never fires onend — watch the engine itself instead.
+  clearPoll();
+  let sawSpeaking=false, ticks=0;
+  spPoll=setInterval(()=>{
+    if(advanced||spCancelled){ clearPoll(); return; }
+    if(spPausedFlag) return;
+    ticks++;
+    if(speechSynthesis.speaking||speechSynthesis.pending){ sawSpeaking=true; return; }
+    if(sawSpeaking){ adv("poll"); return; }
+    if(ticks>15) adv("never-started");   // ~3s and it never began
+  }, 200);
+
+  clearTimeout(spGuard); spGuard=setTimeout(()=>{ if(!advanced && !spPausedFlag){ diagLog("  chunk "+idx+" GUARD FIRED"); try{ speechSynthesis.cancel(); }catch(e){} adv("guard"); } }, txt.length*130+9000);
   try{ speechSynthesis.speak(u); }catch(e){ diagLog("  chunk "+idx+" speak() threw"); adv("throw"); }
 }
-function finishSpeak(){ spStreaming=false; spActive=false; stopWatch(); clearTimeout(spGuard); stopBarge(); if(!recognizing)setState("idle"); const d=spDone; spDone=null; if(d)d(); }
+function finishSpeak(){ spStreaming=false; spActive=false; clearPoll(); stopWatch(); clearTimeout(spGuard); stopBarge(); if(!recognizing)setState("idle"); const d=spDone; spDone=null; if(d)d(); }
 function stopSpeak(){
   if(!speechSynthesis.speaking && !spPausedFlag) return;
   spPausedFlag=true; stopWatch(); clearTimeout(spGuard);
@@ -471,7 +487,7 @@ function resumeSpeak(){
   if(IS_ANDROID){ spCancelled=false; speakChunk(); }             // re-speak from current chunk
   else { try{ speechSynthesis.resume(); }catch(e){} startWatch(); }
 }
-function cancelSpeak(){ spCancelled=true; spStreaming=false; spActive=false; spPausedFlag=false; spDone=null; stopWatch(); clearTimeout(spGuard); try{ speechSynthesis.cancel(); }catch(e){} stopBarge(); }
+function cancelSpeak(){ spCancelled=true; spStreaming=false; spActive=false; spPausedFlag=false; spDone=null; clearPoll(); stopWatch(); clearTimeout(spGuard); try{ speechSynthesis.cancel(); }catch(e){} stopBarge(); }
 
 /* ============================ Gemini call ============================ */
 let searchBroken=false;
