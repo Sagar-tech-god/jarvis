@@ -1,5 +1,5 @@
 // sw.js — caches the app shell so it opens offline and installs cleanly.
-const CACHE = "jarvis-v15";
+const CACHE = "jarvis-v16";
 const ASSETS = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
