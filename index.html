@@ -137,6 +137,15 @@
   #toast{position:fixed; left:50%; bottom:96px; transform:translateX(-50%) translateY(20px); z-index:120; background:var(--panel-2); border:1px solid var(--cyan-dim); color:var(--bright); padding:12px 18px; border-radius:12px; font-family:"Chakra Petch",sans-serif; font-size:13px; letter-spacing:.06em; box-shadow:0 0 30px rgba(var(--acc),.3); opacity:0; pointer-events:none; transition:.3s;}
   #toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
 
+  .lock-bg{position:fixed; inset:0; z-index:200; background:var(--void); display:none; align-items:center; justify-content:center;}
+  .lock-bg.open{display:flex;}
+  .lock-inner{display:flex; flex-direction:column; align-items:center; gap:14px; padding:24px;}
+  .lock-orb{width:90px; height:90px; border-radius:50%; background:radial-gradient(circle at 50% 45%, #fff, rgb(var(--acc)) 45%, transparent 72%); box-shadow:0 0 60px rgba(var(--acc),.6); animation:lockPulse 2.6s ease-in-out infinite;}
+  @keyframes lockPulse{0%,100%{transform:scale(1); opacity:.85} 50%{transform:scale(1.06); opacity:1}}
+  .lock-title{font-family:"Chakra Petch",sans-serif; letter-spacing:.32em; font-size:19px; color:var(--bright); margin-top:6px;}
+  .lock-sub{font-family:"Chakra Petch",sans-serif; letter-spacing:.14em; font-size:11px; color:var(--cyan-dim);}
+  #lockPin{width:190px; text-align:center; letter-spacing:.5em; font-size:20px; padding:12px; border-radius:12px; background:var(--panel); border:1px solid var(--line); color:var(--bright);}
+  .lock-go{padding:11px 30px; border-radius:11px; border:1px solid rgba(var(--acc),.5); background:rgba(var(--acc),.14); color:var(--bright); font-family:"Chakra Petch",sans-serif; letter-spacing:.14em; font-size:13px; cursor:pointer;}
   .cam-bg{position:fixed; inset:0; z-index:150; background:#000; display:none;}
   .cam-bg.open{display:block;}
   .cam-inner{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;}
@@ -166,6 +175,16 @@
   <canvas id="bg"></canvas>
   <div id="boot"><div class="bcore"></div><pre id="bootlog"></pre></div>
   <div id="toast"></div>
+
+  <div class="lock-bg" id="lockScreen">
+    <div class="lock-inner">
+      <div class="lock-orb"></div>
+      <div class="lock-title">J.A.R.V.I.S.</div>
+      <div class="lock-sub" id="lockSub">ENTER ACCESS CODE</div>
+      <input id="lockPin" type="password" inputmode="numeric" maxlength="8" placeholder="••••" autocomplete="off">
+      <button class="lock-go" id="lockGo">UNLOCK</button>
+    </div>
+  </div>
 
   <div class="cam-bg" id="camModal">
     <div class="cam-inner">
@@ -236,6 +255,12 @@
       <div class="grp">
         <div class="row"><label style="margin:0">Conversation Mode</label><div class="toggle" id="convToggle"></div></div>
         <div class="hint">After Jarvis replies, the mic re-opens automatically for a natural back-and-forth. No tapping between turns.</div>
+      </div>
+
+      <div class="grp">
+        <label>Access Code (PIN lock)</label>
+        <input id="pinInput" type="text" inputmode="numeric" maxlength="8" placeholder="Set a PIN (blank = no lock)" autocomplete="off">
+        <div class="hint">Asks for this PIN when Jarvis opens. Keeps casual snoopers out on a shared device.</div>
       </div>
 
       <div class="grp">
@@ -362,7 +387,7 @@ function chunkText(t){
   }
   return out.length?out:[String(t)];
 }
-const APP_VERSION="v12";
+const APP_VERSION="v13";
 let spDiag=false, spLog=[];
 function diagLog(s){ if(!spDiag) return; spLog.push(s); }
 function runSpeechDiag(){
@@ -421,6 +446,9 @@ function cancelSpeak(){ spCancelled=true; spPausedFlag=false; spDone=null; stopW
 
 /* ============================ Gemini call ============================ */
 let searchBroken=false;
+// Grounding roughly doubles latency, so only use it when the question really needs live facts.
+const LIVE_RE=/\b(price|prices|cost|worth|rate|rates|stock|stocks|share|crypto|bitcoin|btc|eth|gold|silver|xau|nifty|sensex|news|headline|headlines|today|tonight|tomorrow|yesterday|current|currently|now|latest|recent|live|score|scores|match|election|weather|forecast|who won|release date|updated|this week|this month|2025|2026)\b/i;
+function needsLive(t){ return LIVE_RE.test(String(t||"")); }
 async function callGemini(contents, useSearch){
   const url="https://generativelanguage.googleapis.com/v1beta/models/"+CONFIG.model+":generateContent?key="+encodeURIComponent(API_KEY);
   const sys={ parts:[{ text:fullPrompt() }] };
@@ -612,8 +640,9 @@ async function askOrCommand(t){
   const paint=txt=>{ bubble.innerHTML='<span class="who">JARVIS</span>'+escapeHtml(txt); logEl.scrollTop=logEl.scrollHeight; };
   try{
     let rep="";
-    try{ rep=await streamGemini(ctxFromHistory(), webSearch, paint); }
-    catch(e){ if(webSearch) searchBroken=true; rep=await callGemini(ctxFromHistory(), webSearch); }
+    const useLive = webSearch && needsLive(t);
+    try{ rep=await streamGemini(ctxFromHistory(), useLive, paint); }
+    catch(e){ if(useLive) searchBroken=true; rep=await callGemini(ctxFromHistory(), useLive); }
     rep=(rep||"").trim()||"My apologies, sir — I received an empty response.";
     paint(rep);
     history.push({ role:"assistant", content:rep }); saveHistory();
@@ -635,8 +664,8 @@ if(SR){
   recognition=new SR(); recognition.lang="en-US"; recognition.interimResults=true; recognition.continuous=false; recognition.maxAlternatives=1;
   function submitSpeech(text){ text=(text||"").trim(); if(!text||sentThisTurn)return; sentThisTurn=true; addMsg("you",text); askOrCommand(text); }
   recognition.onstart=()=>{ if(micMode==="barge") return; recognizing=true; sentThisTurn=false; bestTranscript=""; setState("listening"); setStatus("LISTENING"); micBtn.classList.add("live"); caption("Listening…"); buzz(30); };
-  recognition.onerror=(e)=>{ if(micMode==="barge"){ if(bargeActive&&e.error!=="aborted") setTimeout(()=>{ if(bargeActive){ try{recognition.start();}catch(_){} } },300); return; } recognizing=false; micBtn.classList.remove("live"); setState("idle"); caption((e.error==="not-allowed"||e.error==="service-not-allowed")?"Mic blocked — allow it in the address bar, sir":e.error==="no-speech"?"I didn't hear anything, sir":"Didn't catch that",true); };
-  recognition.onend=()=>{ if(micMode==="barge"){ if(bargeActive){ try{recognition.start();}catch(_){} } return; } recognizing=false; micBtn.classList.remove("live"); if(body.dataset.state==="listening")setState("idle"); if(!sentThisTurn&&bestTranscript)submitSpeech(bestTranscript); };
+  recognition.onerror=(e)=>{ if(micMode==="barge"){ if(bargeActive&&e.error!=="aborted") setTimeout(()=>{ if(bargeActive){ try{recognition.start();}catch(_){} } },300); return; } recognizing=false; micBtn.classList.remove("live"); setState("idle"); const blocked=(e.error==="not-allowed"||e.error==="service-not-allowed"); caption(blocked?"Mic blocked — allow it in the address bar, sir":e.error==="no-speech"?"I didn't hear anything, sir":"Didn't catch that",true); if(!blocked) maybeReloop(); };
+  recognition.onend=()=>{ if(micMode==="barge"){ if(bargeActive){ try{recognition.start();}catch(_){} } return; } recognizing=false; micBtn.classList.remove("live"); if(body.dataset.state==="listening")setState("idle"); if(!sentThisTurn&&bestTranscript){ submitSpeech(bestTranscript); return; } maybeReloop(); };
   recognition.onresult=(e)=>{
     let interim="",final="";
     for(let i=0;i<e.results.length;i++){ const t=e.results[i][0].transcript; if(e.results[i].isFinal)final+=t; else interim+=t; }
@@ -660,6 +689,13 @@ function toggleMic(){
   setTimeout(go,120);
 }
 micBtn.addEventListener("click", toggleMic); orb.addEventListener("click", toggleMic);
+function maybeReloop(){
+  // keeps Conversation Mode alive after silence/timeouts instead of dying after one turn
+  if(!convMode||recognizing) return;
+  if(speechSynthesis.speaking||speechSynthesis.pending) return;   // reply is speaking; its callback will relisten
+  if(body.dataset.state==="thinking") return;                      // waiting on Gemini
+  setTimeout(()=>{ if(convMode && !recognizing && !speechSynthesis.speaking && body.dataset.state!=="thinking") startConvListen(); }, 700);
+}
 function startConvListen(){
   if(!recognition||!convMode||recognizing) return;
   micMode="command"; recognition.continuous=false;
@@ -683,6 +719,14 @@ const bgRow=$("bgRow");
 BGS.forEach(name=>{ const b=document.createElement("div"); b.className="seg"; b.textContent=name; b.dataset.k=name.toLowerCase(); b.onclick=()=>{ setBg(name.toLowerCase()); buzz(15); }; bgRow.appendChild(b); });
 $("voiceSel").addEventListener("change", e=>{ chosenVoiceURI=e.target.value; store.set("voice",chosenVoiceURI); });
 $("testVoice").addEventListener("click", ()=>{ const on=voiceEnabled; voiceEnabled=true; cancelSpeak(); const u=new SpeechSynthesisUtterance("All systems online, sir. This is how I sound at present."); const v=currentVoice(); if(v)u.voice=v; u.rate=spRate; u.pitch=spPitch; u.onstart=()=>setState("speaking"); u.onend=()=>{ setState("idle"); voiceEnabled=on; }; speechSynthesis.cancel(); speechSynthesis.speak(u); });
+$("pinInput").addEventListener("change", e=>{ const v=e.target.value.trim(); store.set("pin",v); toast(v?"Access code set":"Lock removed"); });
+function tryUnlock(){
+  const want=store.get("pin","");
+  if($("lockPin").value.trim()===want){ $("lockScreen").classList.remove("open"); $("lockPin").value=""; buzz(30); boot(); }
+  else { $("lockSub").textContent="ACCESS DENIED — TRY AGAIN"; $("lockPin").value=""; buzz(120); }
+}
+$("lockGo").addEventListener("click", tryUnlock);
+$("lockPin").addEventListener("keydown", e=>{ if(e.key==="Enter") tryUnlock(); });
 $("diagVoice").addEventListener("click", ()=>{ $("sheetBg").classList.remove("open"); setTimeout(runSpeechDiag,300); });
 $("rate").addEventListener("input", e=>{ spRate=parseFloat(e.target.value); $("rateVal").textContent=spRate.toFixed(2); store.set("rate",spRate); });
 $("pitch").addEventListener("input", e=>{ spPitch=parseFloat(e.target.value); $("pitchVal").textContent=spPitch.toFixed(2); store.set("pitch",spPitch); });
@@ -807,8 +851,9 @@ convMode=store.get("conv","")==="1"; $("convToggle").classList.toggle("on",convM
 spRate=parseFloat(store.get("rate","1.03"))||1.03; spPitch=parseFloat(store.get("pitch","0.95"))||0.95;
 $("rate").value=spRate; $("rateVal").textContent=spRate.toFixed(2); $("pitch").value=spPitch; $("pitchVal").textContent=spPitch.toFixed(2);
 $("ver").textContent=APP_VERSION;
+$("pinInput").value=store.get("pin","");
 reminders=reminders.filter(r=>r.time>Date.now()); store.setJSON("reminders",reminders); reminders.forEach(scheduleReminder);
-window.addEventListener("load", ()=>{ setStatus("ONLINE"); boot(); });
+window.addEventListener("load", ()=>{ setStatus("ONLINE"); if(store.get("pin","")){ $("lockScreen").classList.add("open"); setTimeout(()=>$("lockPin").focus(),300); } else { boot(); } });
 if("serviceWorker" in navigator){ window.addEventListener("load", ()=>navigator.serviceWorker.register("./sw.js").catch(()=>{})); }
 </script>
 </body>
