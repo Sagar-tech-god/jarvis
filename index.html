@@ -83,7 +83,7 @@
 
   .log{flex:1 1 auto; overflow-y:auto; padding:12px 16px 6px; display:flex; flex-direction:column; gap:10px; -webkit-overflow-scrolling:touch; user-select:text;}
   .log::-webkit-scrollbar{width:0;}
-  .msg{max-width:82%; padding:10px 13px; font-size:14.5px; line-height:1.45; border-radius:14px; word-wrap:break-word;}
+  .msg{max-width:82%; padding:10px 13px; font-size:14.5px; line-height:1.45; border-radius:14px; word-wrap:break-word; white-space:pre-wrap;}
   .msg.you{align-self:flex-end; background:rgba(var(--acc),.12); border:1px solid var(--line); border-bottom-right-radius:4px;}
   .msg.jar{align-self:flex-start; background:var(--panel); border:1px solid rgba(255,255,255,.05); border-bottom-left-radius:4px;}
   .msg.jar .who{font-family:"Chakra Petch",sans-serif; font-size:9px; letter-spacing:.24em; color:var(--cyan-dim); display:block; margin-bottom:3px;}
@@ -185,6 +185,7 @@
         <span><span class="dot"></span><span id="sysText">ONLINE</span></span>
         <span id="clock">--:--:--</span>
         <span id="batt"></span>
+        <span id="ver" style="color:rgb(var(--acc)); font-weight:700"></span>
       </div>
     </div>
     <div class="hdr-btns">
@@ -246,6 +247,8 @@
       <div class="grp">
         <label>Voice</label>
         <div class="row" style="gap:8px"><select id="voiceSel" style="flex:1"></select><button class="seg" id="testVoice" style="white-space:nowrap">▶ TEST</button></div>
+        <div class="row" style="gap:8px; margin-top:8px"><button class="seg" id="diagVoice" style="flex:1; white-space:nowrap">🔎 SPEECH DIAGNOSTIC</button></div>
+        <div class="hint">Runs a long paragraph and reports exactly where the audio stops.</div>
         <div style="margin-top:12px"><label style="margin-bottom:6px">Speed <span id="rateVal" style="color:var(--cyan-dim)">1.0</span></label><input id="rate" type="range" min="0.6" max="1.4" step="0.05" value="1.03"></div>
         <div style="margin-top:10px"><label style="margin-bottom:6px">Pitch / Depth <span id="pitchVal" style="color:var(--cyan-dim)">0.95</span></label><input id="pitch" type="range" min="0.5" max="1.3" step="0.05" value="0.95"></div>
       </div>
@@ -350,24 +353,71 @@ function loadVoices(){
 if("speechSynthesis" in window){ loadVoices(); speechSynthesis.onvoiceschanged=loadVoices; }
 function currentVoice(){ return voices.find(v=>v.voiceURI===chosenVoiceURI) || voices.find(v=>/en-GB/i.test(v.lang)&&/male|daniel|arthur|uk/i.test(v.name)) || voices.find(v=>/en-GB/i.test(v.lang)) || voices.find(v=>/^en/i.test(v.lang)) || null; }
 let voiceEnabled=true, voiceInterrupt=true, convMode=false, spRate=1.03, spPitch=0.95;
-let spQueue=[], spIdx=0, spPaused=false, spIntentional=false, spStarted=false, spDone=null;
-function splitSentences(t){ return (String(t).match(/[^.!?]+[.!?]*/g)||[t]).map(s=>s.trim()).filter(Boolean); }
+let spChunks=[], spCi=0, spDone=null, spCancelled=false, spWatch=null, spGuard=null, spPausedFlag=false;
+function chunkText(t){
+  const out=[]; const sents=String(t).replace(/\s+/g," ").match(/[^.!?;]+[.!?;]*/g)||[t];
+  for(let s of sents){ s=s.trim(); if(!s) continue;
+    while(s.length>170){ let cut=s.lastIndexOf(",",170); if(cut<70)cut=s.lastIndexOf(" ",170); if(cut<70)cut=170; out.push(s.slice(0,cut).trim()); s=s.slice(cut).trim(); }
+    if(s) out.push(s);
+  }
+  return out.length?out:[String(t)];
+}
+const APP_VERSION="v12";
+let spDiag=false, spLog=[];
+function diagLog(s){ if(!spDiag) return; spLog.push(s); }
+function runSpeechDiag(){
+  const para="This is a diagnostic test of the speech engine. It contains several sentences on purpose. The goal is to find exactly where the audio stops. If you can hear this final sentence, the speech system is working correctly, sir.";
+  spDiag=true; spLog=[];
+  addMsg("jar","Running speech diagnostic — listen, then read the report below.");
+  const started=Date.now();
+  speak(para, ()=>{
+    spDiag=false;
+    const secs=((Date.now()-started)/1000).toFixed(1);
+    addMsg("jar","DIAGNOSTIC REPORT ("+APP_VERSION+")\nchunks: "+spChunks.length+"\nduration: "+secs+"s\nevents:\n"+spLog.join("\n"));
+  });
+}
+const IS_ANDROID=/Android/i.test(navigator.userAgent);
+// NOTE: speechSynthesis.pause()/resume() is unreliable on Android — it can kill the
+// utterance so onend never fires. Chunking alone handles the length limit there.
+function startWatch(){ stopWatch(); if(IS_ANDROID) return; spWatch=setInterval(()=>{ try{ if(speechSynthesis.speaking && !speechSynthesis.paused){ speechSynthesis.pause(); speechSynthesis.resume(); } }catch(e){} }, 8000); }
+function stopWatch(){ if(spWatch){ clearInterval(spWatch); spWatch=null; } }
 function speak(text, done){
+  cancelSpeak();
   if(!voiceEnabled||!("speechSynthesis" in window)){ if(done)done(); return; }
-  cancelSpeak(); spQueue=splitSentences(text); spIdx=0; spPaused=false; spStarted=false; spDone=done||null; speakNext();
+  spChunks=chunkText(text); spCi=0; spDone=done||null; spCancelled=false; spPausedFlag=false;
+  setState("speaking"); startWatch(); if(voiceInterrupt && !convMode) startBarge();
+  speakChunk();
 }
-function speakNext(){
-  if(spPaused) return;
-  if(spIdx>=spQueue.length){ if(!recognizing)setState("idle"); stopBarge(); const d=spDone; spDone=null; if(d)d(); return; }
-  const u=new SpeechSynthesisUtterance(spQueue[spIdx]);
+function speakChunk(){
+  if(spCancelled) return;
+  if(spCi>=spChunks.length){ finishSpeak(); return; }
+  const txt=spChunks[spCi];
+  const idx=spCi;
+  const u=new SpeechSynthesisUtterance(txt);
   const v=currentVoice(); if(v)u.voice=v; u.rate=spRate; u.pitch=spPitch;
-  u.onstart=()=>{ setState("speaking"); if(!spStarted){ spStarted=true; if(!convMode) startBarge(); } };
-  u.onend=()=>{ if(spIntentional){ spIntentional=false; return; } spIdx++; speakNext(); };
-  speechSynthesis.speak(u);
+  let advanced=false;
+  const adv=(why)=>{ if(advanced||spCancelled) return; advanced=true; diagLog("  chunk "+idx+" -> advanced ("+why+")"); clearTimeout(spGuard); spCi++; speakChunk(); };
+  u.onstart=()=>{ diagLog("chunk "+idx+" start ("+txt.length+" chars)"); };
+  u.onend=()=>adv("onend");
+  u.onerror=(e)=>{ diagLog("  chunk "+idx+" ERROR: "+(e&&e.error||"?")); adv("onerror"); };
+  clearTimeout(spGuard); spGuard=setTimeout(()=>{ if(!advanced && !spPausedFlag){ diagLog("  chunk "+idx+" GUARD FIRED (onend never came)"); try{ speechSynthesis.cancel(); }catch(e){} adv("guard"); } }, txt.length*130+9000);
+  try{ speechSynthesis.speak(u); }catch(e){ diagLog("  chunk "+idx+" speak() threw"); adv("throw"); }
 }
-function stopSpeak(){ if(spIdx>=spQueue.length&&!speechSynthesis.speaking) return; spPaused=true; spIntentional=true; try{speechSynthesis.cancel();}catch(e){} setState("idle"); toast("⏸ Paused — say \"continue\""); }
-function resumeSpeak(){ if(spPaused&&spIdx<spQueue.length){ spPaused=false; toast("▶ Resuming"); speakNext(); } }
-function cancelSpeak(){ spPaused=false; spIntentional=true; spQueue=[]; spIdx=0; spDone=null; try{speechSynthesis.cancel();}catch(e){} stopBarge(); }
+function finishSpeak(){ stopWatch(); clearTimeout(spGuard); stopBarge(); if(!recognizing)setState("idle"); const d=spDone; spDone=null; if(d)d(); }
+function stopSpeak(){
+  if(!speechSynthesis.speaking && !spPausedFlag) return;
+  spPausedFlag=true; stopWatch(); clearTimeout(spGuard);
+  if(IS_ANDROID){ try{ speechSynthesis.cancel(); }catch(e){} }   // pause() unreliable on Android
+  else { try{ speechSynthesis.pause(); }catch(e){} }
+  setState("idle"); toast("⏸ Paused — say \"continue\"");
+}
+function resumeSpeak(){
+  if(!spPausedFlag) return;
+  spPausedFlag=false; setState("speaking"); toast("▶ Resuming");
+  if(IS_ANDROID){ spCancelled=false; speakChunk(); }             // re-speak from current chunk
+  else { try{ speechSynthesis.resume(); }catch(e){} startWatch(); }
+}
+function cancelSpeak(){ spCancelled=true; spPausedFlag=false; spDone=null; stopWatch(); clearTimeout(spGuard); try{ speechSynthesis.cancel(); }catch(e){} stopBarge(); }
 
 /* ============================ Gemini call ============================ */
 let searchBroken=false;
@@ -447,8 +497,8 @@ async function askVision(dataUrl, mime){
     const reply=(await callGemini(contents,false)) || "I couldn't make out that image, sir.";
     history.push({ role:"user", content:"[sent an image]" });
     history.push({ role:"assistant", content:reply }); saveHistory();
-    addMsg("jar", reply); setStatus("ONLINE"); caption("Online",true); speak(reply);
-    if(!voiceEnabled) setState("idle");
+    addMsg("jar", reply); setStatus("ONLINE"); caption("Online",true); speak(reply, ()=>{ if(convMode) startConvListen(); });
+    if(!voiceEnabled){ setState("idle"); if(convMode) startConvListen(); }
   }catch(err){
     setState("idle"); setStatus("ONLINE");
     addMsg("jar","My vision faltered, sir. ("+String(err.message||err).slice(0,90)+")"); caption("Error",true);
@@ -614,7 +664,15 @@ function startConvListen(){
   if(!recognition||!convMode||recognizing) return;
   micMode="command"; recognition.continuous=false;
   caption("Listening…");
-  setTimeout(()=>{ if(convMode && !recognizing){ try{ recognition.start(); }catch(e){ setTimeout(()=>{ try{recognition.start();}catch(_){} },250); } } }, 300);
+  let tries=0;
+  const attempt=()=>{
+    if(!convMode||recognizing) return;
+    // Android: speech engine must fully release the audio channel before the mic can open
+    if(speechSynthesis.speaking||speechSynthesis.pending){ if(tries++<20) return setTimeout(attempt,200); }
+    try{ recognition.start(); }
+    catch(e){ if(tries++<6) setTimeout(attempt,300); else caption("Tap the mic to continue",true); }
+  };
+  setTimeout(attempt, IS_ANDROID?600:300);
 }
 
 /* ============================ settings wiring ============================ */
@@ -625,6 +683,7 @@ const bgRow=$("bgRow");
 BGS.forEach(name=>{ const b=document.createElement("div"); b.className="seg"; b.textContent=name; b.dataset.k=name.toLowerCase(); b.onclick=()=>{ setBg(name.toLowerCase()); buzz(15); }; bgRow.appendChild(b); });
 $("voiceSel").addEventListener("change", e=>{ chosenVoiceURI=e.target.value; store.set("voice",chosenVoiceURI); });
 $("testVoice").addEventListener("click", ()=>{ const on=voiceEnabled; voiceEnabled=true; cancelSpeak(); const u=new SpeechSynthesisUtterance("All systems online, sir. This is how I sound at present."); const v=currentVoice(); if(v)u.voice=v; u.rate=spRate; u.pitch=spPitch; u.onstart=()=>setState("speaking"); u.onend=()=>{ setState("idle"); voiceEnabled=on; }; speechSynthesis.cancel(); speechSynthesis.speak(u); });
+$("diagVoice").addEventListener("click", ()=>{ $("sheetBg").classList.remove("open"); setTimeout(runSpeechDiag,300); });
 $("rate").addEventListener("input", e=>{ spRate=parseFloat(e.target.value); $("rateVal").textContent=spRate.toFixed(2); store.set("rate",spRate); });
 $("pitch").addEventListener("input", e=>{ spPitch=parseFloat(e.target.value); $("pitchVal").textContent=spPitch.toFixed(2); store.set("pitch",spPitch); });
 $("keyInput").addEventListener("change", e=>{ API_KEY=e.target.value.trim(); store.set("key",API_KEY); if(API_KEY)caption("Key saved — ready, sir",true); });
@@ -743,10 +802,11 @@ setBg(store.get("bg","tunnel"));
 API_KEY=store.get("key","");
 CONFIG.model=store.get("model",CONFIG.model);
 webSearch=store.get("search","1")==="1"; $("searchToggle").classList.toggle("on",webSearch);
-voiceInterrupt=store.get("interrupt","1")==="1"; $("interruptToggle").classList.toggle("on",voiceInterrupt);
+voiceInterrupt=store.get("interrupt","0")==="1"; $("interruptToggle").classList.toggle("on",voiceInterrupt);
 convMode=store.get("conv","")==="1"; $("convToggle").classList.toggle("on",convMode);
 spRate=parseFloat(store.get("rate","1.03"))||1.03; spPitch=parseFloat(store.get("pitch","0.95"))||0.95;
 $("rate").value=spRate; $("rateVal").textContent=spRate.toFixed(2); $("pitch").value=spPitch; $("pitchVal").textContent=spPitch.toFixed(2);
+$("ver").textContent=APP_VERSION;
 reminders=reminders.filter(r=>r.time>Date.now()); store.setJSON("reminders",reminders); reminders.forEach(scheduleReminder);
 window.addEventListener("load", ()=>{ setStatus("ONLINE"); boot(); });
 if("serviceWorker" in navigator){ window.addEventListener("load", ()=>navigator.serviceWorker.register("./sw.js").catch(()=>{})); }
